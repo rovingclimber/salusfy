@@ -11,6 +11,11 @@ import json
 import homeassistant.helpers.config_validation as cv
 import voluptuous as vol
 from homeassistant.components.climate.const import (
+#    CURRENT_HVAC_HEAT,
+#    CURRENT_HVAC_IDLE,
+#    HVAC_MODE_HEAT,
+#    HVAC_MODE_OFF,
+#    SUPPORT_TARGET_TEMPERATURE,
     HVACAction,
     HVACMode,
     ClimateEntityFeature,
@@ -21,6 +26,7 @@ from homeassistant.const import (
     CONF_USERNAME,
     CONF_ID,
     UnitOfTemperature,
+#    TEMP_CELSIUS,
 )
 
 try:
@@ -34,11 +40,7 @@ except ImportError:
         PLATFORM_SCHEMA,
     )
 
-
-from homeassistant.helpers.reload import async_setup_reload_service
-
-__version__ = "0.0.3"
-
+__version__ = "0.0.1"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,7 +51,6 @@ URL_SET_DATA = "https://salus-it500.com/includes/set.php"
 
 DEFAULT_NAME = "Salus Thermostat"
 
-
 CONF_NAME = "name"
 
 # Values from web interface
@@ -57,10 +58,6 @@ MIN_TEMP = 5
 MAX_TEMP = 34.5
 
 SUPPORT_FLAGS = ClimateEntityFeature.TARGET_TEMPERATURE
-
-DOMAIN = "salusfy"
-PLATFORMS = ["climate"]
-
 
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
@@ -73,19 +70,15 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
 )
 
 
-# def setup_platform(hass, config, add_entities, discovery_info=None):
-async def async_setup_platform(hass, config, async_add_entities, discovery_info=None):
-    await async_setup_reload_service(hass, DOMAIN, PLATFORMS)
+def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up the E-Thermostaat platform."""
     name = config.get(CONF_NAME)
     username = config.get(CONF_USERNAME)
     password = config.get(CONF_PASSWORD)
     id = config.get(CONF_ID)
 
-    # add_entities(
-    #     [SalusThermostat(name, username, password, id)]
-    async_add_entities(
-    [SalusThermostat(name, username, password, id)]
+    add_entities(
+        [SalusThermostat(name, username, password, id)]
     )
 
 
@@ -104,7 +97,7 @@ class SalusThermostat(ClimateEntity):
         self._status = None
         self._current_operation_mode = None
         self._token = None
-        
+        self._token_timestamp = None
         self._session = requests.Session()
         
         
@@ -178,9 +171,9 @@ class SalusThermostat(ClimateEntity):
     @property
     def hvac_action(self):
         """Return the current running hvac operation."""
-        if self._status == "ON":
-            return HVACAction.HEATING
-        return HVACAction.IDLE
+        if self._target_temperature < self._current_temperature:
+            return HVACAction.IDLE
+        return HVACAction.HEATING
         
 
     @property
@@ -205,13 +198,9 @@ class SalusThermostat(ClimateEntity):
         """Set new target temperature, via URL commands."""
         payload = {"token": self._token, "devId": self._id, "tempUnit": "0", "current_tempZ1_set": "1", "current_tempZ1": temperature}
         headers = {"content-type": "application/x-www-form-urlencoded"}
-        try:
-            if self._session.post(URL_SET_DATA, data=payload, headers=headers):
-                self._target_temperature = temperature
-                # self.schedule_update_ha_state(force_refresh=True)
-            _LOGGER.info("Salusfy set_temperature OK")
-        except:
-            _LOGGER.error("Error Setting the temperature.")
+        if self._session.post(URL_SET_DATA, data=payload, headers=headers):
+            self._target_temperature = temperature
+            # self.schedule_update_ha_state(force_refresh=True)
 
     def set_hvac_mode(self, hvac_mode):
         """Set HVAC mode, via URL commands."""
@@ -219,68 +208,59 @@ class SalusThermostat(ClimateEntity):
         headers = {"content-type": "application/x-www-form-urlencoded"}
         if hvac_mode == HVACMode.OFF:
             payload = {"token": self._token, "devId": self._id, "auto": "1", "auto_setZ1": "1"}
-            try:
-                if self._session.post(URL_SET_DATA, data=payload, headers=headers):
-                    self._current_operation_mode = "OFF"
-            except:
-                _LOGGER.error("Error Setting HVAC mode OFF.")
+            if self._session.post(URL_SET_DATA, data=payload, headers=headers):
+                self._current_operation_mode = "OFF"
         elif hvac_mode == HVACMode.HEAT:
             payload = {"token": self._token, "devId": self._id, "auto": "0", "auto_setZ1": "1"}
-            try:
-                if self._session.post(URL_SET_DATA, data=payload, headers=headers):
-                    self._current_operation_mode = "ON"
-            except:
-                _LOGGER.error("Error Setting HVAC mode.")
-        _LOGGER.info("Setting the HVAC mode.")
+            if self._session.post(URL_SET_DATA, data=payload, headers=headers):
+                self._current_operation_mode = "ON"
             
     def get_token(self):
         """Get the Session Token of the Thermostat."""
-        payload = {"IDemail": self._username, "password": self._password, "login": "Login", "keep_logged_in": "1"}
+        payload = {"IDemail": self._username, "password": self._password, "login": "Login"}
         headers = {"content-type": "application/x-www-form-urlencoded"}
         
-        try:
-            self._session.post(URL_LOGIN, data=payload, headers=headers)
-            params = {"devId": self._id}
-            getTkoken = self._session.get(URL_GET_TOKEN,params=params)
-            result = re.search('<input id="token" type="hidden" value="(.*)" />', getTkoken.text)
-            _LOGGER.info("Salusfy get_token OK")
-            self._token = result.group(1)
-        except:
-            _LOGGER.error("Error Geting the Session Token.")
+        self._session.post(URL_LOGIN, data=payload, headers=headers)
+        params = {"devId": self._id}
+        getTkoken = self._session.get(URL_GET_TOKEN,params=params)
+        result = re.search('<input id="token" type="hidden" value="(.*)" />', getTkoken.text)
+
+        self._token = result.group(1)
+        self._token_timestamp = int( time.time() )
+        _LOGGER.info("Got new token. Timestamp: " + str(self._token_timestamp))
+
 
     def _get_data(self):
-        if self._token is None:
+        cur_timestamp = int( time.time() )
+        _LOGGER.info("Starting _get_data. Timestamp: " + str(cur_timestamp))
+        # if no token or token older than 1h ...
+        if self._token is None or (cur_timestamp-self._token_timestamp) > 3600:
+            _LOGGER.info("No token or token expired, calling get_token.")
             self.get_token()
+        else:
+            _LOGGER.info("We have a token. Timestamp: " + str(self._token_timestamp))
         params = {"devId": self._id, "token": self._token, "&_": str(int(round(time.time() * 1000)))}
-        try:
-            r = self._session.get(url = URL_GET_DATA, params = params)
-            try:
-                if r:
-                    data = json.loads(r.text)
-                    _LOGGER.info("Salusfy get_data output OK")
-                    self._target_temperature = float(data["CH1currentSetPoint"])
-                    self._current_temperature = float(data["CH1currentRoomTemp"])
-                    self._frost = float(data["frost"])
-                    
-                    status = data['CH1heatOnOffStatus']
-                    if status == "1":
-                      self._status = "ON"
-                    else:
-                      self._status = "OFF"
-                    mode = data['CH1heatOnOff']
-                    if mode == "1":
-                      self._current_operation_mode = "OFF"
-                    else:
-                      self._current_operation_mode = "ON"
-                else:
-                    _LOGGER.error("Could not get data from Salus.")
-            except:
-                self.get_token()
-                self._get_data()
-        except:
-            _LOGGER.error("Error Geting the data from Web. Please check the connection to salus-it500.com manually.")
+        r = self._session.get(url = URL_GET_DATA, params = params)
+        if r:
+            data = json.loads(r.text)
+
+            self._target_temperature = float(data["CH1currentSetPoint"])
+            self._current_temperature = float(data["CH1currentRoomTemp"])
+            self._frost = float(data["frost"])
+            
+            status = data['CH1heatOnOffStatus']
+            if status == "1":
+              self._status = "ON"
+            else:
+              self._status = "OFF"
+            mode = data['CH1heatOnOff']
+            if mode == "1":
+              self._current_operation_mode = "OFF"
+            else:
+              self._current_operation_mode = "ON"
+        else:
+            _LOGGER.error("Could not get data from Salus.")
 
     def update(self):
         """Get the latest data."""
         self._get_data()
-
